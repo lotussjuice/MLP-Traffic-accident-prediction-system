@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IA Predicción de Accidentes</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+
+<div id="loadingOverlay">
+    <div class="spinner-border text-info mb-3" role="status"></div>
+    <h4 class="text-white">Procesando Datos...</h4>
+    <small class="text-muted">Analizando Dataset y cargango MLP</small>
+</div>
+
+<div id="dashboardOverlay" class="dashboard-overlay">
+    <div class="dashboard-content">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2 class="m-0"><i class="bi bi-bar-chart-fill text-primary"></i> Estadísticas Generales</h2>
+            <button class="btn btn-outline-light btn-sm" onclick="closeDashboard()"><i class="bi bi-x-lg"></i> Cerrar</button>
+        </div>
+        
+        <div id="dashboardBody">
+             <div class="text-center py-5"><div class="spinner-border text-light"></div></div>
+        </div>
+    </div>
+</div>
+
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-md-3 sidebar">
+            <div class="text-center mb-4">
+                <h3 class="mb-1"><i class="bi bi-cpu"></i> MLP</h3>
+                <span class="badge bg-secondary opacity-50">Sistema de prediccón de accidentes USA</span>
+            </div>
+            
+            <form action="/" method="post" id="mainForm" onsubmit="showLoading()">
+                <div class="mb-3">
+                    <label>Ciudad de estudio</label>
+                    <select class="form-select" name="ciudad" onchange="showLoading(); this.form.submit()">
+                        {% for c in ciudades_list %}
+                        <option value="{{ c }}" {% if c == ciudad_sel %}selected{% endif %}>{{ c }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-check form-switch mb-3">
+                    <input class="form-check-input" type="checkbox" id="checkDia" name="check_dia" 
+                           {% if check_dia %}checked{% endif %} onchange="toggleHourInput()">
+                    <label class="form-check-label" for="checkDia">Predicción general por día</label>
+                </div>
+
+                <div class="mb-3" id="hourInputGroup">
+                    <label>Hora: <span class="text-info" id="hourDisplay">{{ hora }}:00</span></label>
+                    <input type="range" class="form-range" min="0" max="23" name="hora" value="{{ hora }}" 
+                           oninput="document.getElementById('hourDisplay').innerText = this.value + ':00'">
+                </div>
+
+                <div class="mb-3">
+                    <label>Día de la semana</label>
+                    <select class="form-select" name="dia">
+                        <option value="0" {% if dia==0 %}selected{% endif %}>Lunes</option>
+                        <option value="1" {% if dia==1 %}selected{% endif %}>Martes</option>
+                        <option value="2" {% if dia==2 %}selected{% endif %}>Miércoles</option>
+                        <option value="3" {% if dia==3 %}selected{% endif %}>Jueves</option>
+                        <option value="4" {% if dia==4 %}selected{% endif %}>Viernes</option>
+                        <option value="5" {% if dia==5 %}selected{% endif %}>Sábado</option>
+                        <option value="6" {% if dia==6 %}selected{% endif %}>Domingo</option>
+                    </select>
+                </div>
+
+                <div class="mb-3">
+                    <label>Condición climática</label>
+                    <select class="form-select" name="clima">
+                        <option value="Any" {% if clima=='Any' %}selected{% endif %}>🌍 Cualquiera (Promedio)</option>
+                        <option value="Clear" {% if clima=='Clear' %}selected{% endif %}>☀️ Despejado</option>
+                        <option value="Rain" {% if clima=='Rain' %}selected{% endif %}>🌧️ Lluvia</option>
+                        <option value="Cloudy" {% if clima=='Cloudy' %}selected{% endif %}>🌥️ Nublado</option>
+                        <option value="Fog" {% if clima=='Fog' %}selected{% endif %}>🌫️ Niebla</option>
+                        <option value="Snow" {% if clima=='Snow' %}selected{% endif %}>❄️ Nieve</option>
+                    </select>
+                </div>
+
+                <button type="submit" class="btn btn-predict shadow-sm">
+                    <i class="bi bi-lightning-charge"></i> Calcular Riesgo
+                </button>
+            </form>
+
+            <hr class="border-secondary my-4">
+
+            <button class="btn btn-primary w-100 mb-2" onclick="openDashboard()">
+                 <i class="bi bi-graph-up"></i> Ver Estadísticas
+            </button>
+
+            <button class="btn btn-toggle w-100 mb-3" onclick="toggleMapLayer()">
+                <i class="bi bi-eye"></i> <span id="btnText">Ocultar mapa</span>
+            </button>
+
+            <div class="p-3 rounded legend-container" style="background: rgba(255,255,255,0.05);">
+                <div style="grid-column: span 2;"><label class="mb-2 text-uppercase small" style="letter-spacing:1px;">Probabilidad</label></div>
+                <div class="legend-item"><span class="color-box" style="background:#2c3e50;"></span> < 10%</div>
+                <div class="legend-item"><span class="color-box" style="background:#a0c9f1;"></span> 10-20%</div>
+                <div class="legend-item"><span class="color-box" style="background:#74d0ef;"></span> 20-30%</div>
+                <div class="legend-item"><span class="color-box" style="background:#46BABC;"></span> 30-40%</div>
+                <div class="legend-item"><span class="color-box" style="background:#2ecc71;"></span> 40-50%</div>
+                <div class="legend-item"><span class="color-box" style="background:#f1c40f;"></span> 50-60%</div>
+                <div class="legend-item"><span class="color-box" style="background:#f39c12;"></span> 60-70%</div>
+                <div class="legend-item"><span class="color-box" style="background:#e67e22;"></span> 70-80%</div>
+                <div class="legend-item"><span class="color-box" style="background:#e74c3c;"></span> 80-90%</div>
+                <div class="legend-item"><span class="color-box" style="background:#c0392b;"></span> 90-95%</div>
+                <div class="legend-item" style="grid-column: span 2;"><span class="color-box" style="background:#8b0000;"></span> > 95% (Critico)</div>
+            </div>
+        </div>
+        
+        <div class="col-md-9 map-wrapper">
+            <button class="btn-center" onclick="centerMap()" title="Centrar Mapa">
+                <i class="bi bi-crosshair"></i>
+            </button>
+            {{ mapa_html|safe }}    
+        </div>
+        
+        <div id="rightSidebar" class="right-sidebar">
+            <button class="btn-close-sidebar" onclick="closeSidebar()" title="Cerrar">&times;</button>
+            <h5 class="mt-2 mb-4"><i class="bi bi-exclamation-triangle"></i> Historial</h5>
+            <div id="accidentsContent">
+                <p class="text-muted small">Selecciona un cuadrante en el mapa para ver los accidentes registrados en esa zona.</p>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

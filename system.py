@@ -6,13 +6,17 @@ import time
 import pandas as pd
 import numpy as np
 # Flask y folium para la app web
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template, request, jsonify
 import folium
 from folium import FeatureGroup
 # Sklearn provee modelos y utilidades ML
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.neighbors import KDTree
+import warnings
+
+# Ignorar advertencias no criticas para limpiar consola
+warnings.filterwarnings("ignore", category=UserWarning)
 
 app = Flask(__name__)
 
@@ -38,30 +42,14 @@ modelo_actual = {
     "mlp": None,
     "scaler": None,
     "encoder": None,
-    "kdtree": None
+    "kdtree": None,
+    "df": None,        # DataFrame histórico para consultas
+    "grid_steps": None # Pasos lat/lng para calcular bounding box
 }
 
 # ==============================================================================
 # LÓGICA DE MACHINE LEARNING
 # ==============================================================================
-
-def generar_datos_sinteticos_fallback(ciudad):
-    # Genera un dataset sintético simple si no hay datos reales.
-    # En caso de no encontrar datos, usamos una distribución uniforme
-    print(f" [ALERTA] Usando modo demostración (Sintético) para {ciudad}...")
-    center = CIUDADES.get(ciudad, [34.05, -118.24])
-    n_samples = 4000
-    # Aumentamos dispersión para cubrir más área en modo demo
-    lat_base = np.random.uniform(center[0]-0.25, center[0]+0.25, n_samples)
-    lng_base = np.random.uniform(center[1]-0.3, center[1]+0.3, n_samples)
-    
-    data = {
-        'Start_Lat': lat_base,
-        'Start_Lng': lng_base,
-        'Start_Time': pd.date_range(start='1/1/2023', periods=n_samples, freq='h'),
-        'Weather_Condition': np.random.choice(['Clear', 'Rain', 'Cloudy'], n_samples)
-    }
-    return pd.DataFrame(data)
 
 def preparar_dataset_probabilistico(df_reales):
     # Preparar dataset
@@ -121,16 +109,15 @@ def entrenar_modelo(ciudad_sel):
     print(f"\n >>> ENTRENANDO NUEVO MODELO PARA: {ciudad_sel}")
     
     # Carga y preprocesamiento de datos
-    if os.path.exists(DATASET_FILE):
-        try:
-            # Leemos solo columnas clave para eficiencia
-            df = pd.read_csv(DATASET_FILE, usecols=['Start_Lat', 'Start_Lng', 'Start_Time', 'Weather_Condition', 'City'], nrows=600000)
-            df = df[df['City'] == ciudad_sel].copy()
-            if len(df) < 50: raise ValueError("Pocos datos")
-        except:
-            df = generar_datos_sinteticos_fallback(ciudad_sel)
-    else:
-        df = generar_datos_sinteticos_fallback(ciudad_sel)
+    if not os.path.exists(DATASET_FILE):
+        raise FileNotFoundError(f"El archivo {DATASET_FILE} no existe. Se requiere dataset real.")
+
+    # Leemos solo columnas clave para eficiencia + Description/Severity para el detalle
+    df = pd.read_csv(DATASET_FILE, usecols=['Start_Lat', 'Start_Lng', 'Start_Time', 'Weather_Condition', 'City', 'Description', 'Severity'], nrows=600000)
+    df = df[df['City'] == ciudad_sel].copy()
+    
+    if len(df) < 50: 
+        raise ValueError(f"Pocos datos reales encontrados para {ciudad_sel}.")
 
     # Preprocesamiento básico y filtrado de columnas
     df['Start_Time'] = pd.to_datetime(df['Start_Time'], errors='coerce')
@@ -174,11 +161,18 @@ def entrenar_modelo(ciudad_sel):
     # Construcción del KDTree para filtrado geografico rapido
     # Solo puntos con alta probabilidad de accidente
     # Esto ayuda a limitar las predicciones a calles y zonas transitadas.
-    df_reales = df_entrenamiento[df_entrenamiento['Probabilidad'] >= 0.8]
-    kdtree = KDTree(df_reales[['Start_Lat', 'Start_Lng']].values, leaf_size=40)
+    df_reales_high = df_entrenamiento[df_entrenamiento['Probabilidad'] >= 0.8]
+    kdtree = KDTree(df_reales_high[['Start_Lat', 'Start_Lng']].values, leaf_size=40)
 
     # Guardar en estado global
-    modelo_actual.update({"ciudad": ciudad_sel, "mlp": mlp, "scaler": scaler, "encoder": le, "kdtree": kdtree})
+    modelo_actual.update({
+        "ciudad": ciudad_sel, 
+        "mlp": mlp, 
+        "scaler": scaler, 
+        "encoder": le, 
+        "kdtree": kdtree,
+        "df": df # Guardamos el DF original para consultas de detalle
+    })
 
 # ==============================================================================
 # LÓGICA DE VISUALIZACIÓN
@@ -186,9 +180,9 @@ def entrenar_modelo(ciudad_sel):
 
 def obtener_color_riesgo(prob):
     if prob < 0.10: return '#2c3e50', 0.15 # Base Gris Oscuro (Latente)
-    if prob < 0.20: return '#1e90ff', 0.35 
-    if prob < 0.30: return '#00bfff', 0.40 
-    if prob < 0.40: return '#00ced1', 0.45 
+    if prob < 0.20: return "#a0c9f1", 0.35 
+    if prob < 0.30: return "#74d0ef", 0.40 
+    if prob < 0.40: return "#46BABC", 0.45 
     if prob < 0.50: return '#2ecc71', 0.50 # Verde (Medio)
     if prob < 0.60: return '#f1c40f', 0.55 
     if prob < 0.70: return '#f39c12', 0.60 # Naranja (Alto)
@@ -213,6 +207,11 @@ def crear_mapa(ciudad, hora, dia, clima, check_dia):
     lat_min, lat_max = center[0]-0.25, center[0]+0.25
     lng_min, lng_max = center[1]-0.30, center[1]+0.30
     
+    # Calculamos step y lo guardamos globalmente para el filtrado posterior
+    lat_step = (lat_max - lat_min) / resolucion
+    lng_step = (lng_max - lng_min) / resolucion
+    modelo_actual["grid_steps"] = (lat_step, lng_step)
+
     # Generación de coordenadas de la malla
     # Crear una cuadrícula de puntos (lat, lng)
     lat_range = np.linspace(lat_min, lat_max, resolucion)
@@ -220,16 +219,18 @@ def crear_mapa(ciudad, hora, dia, clima, check_dia):
     grid_coords = np.array([[lat, lng] for lat in lat_range for lng in lng_range])
     
     # KDTREE Filtering Geográfico
-    # Solo predecimos para puntos cercanos a historial real (calles).
-    # Esto elimina artefactos en el mar o desierto.
+    # AJUSTE: Reducir radio para evitar sobreestimación en zonas vacías
+    RADIO_ACCIDENTE = 0.010 
     dist, _ = modelo_actual["kdtree"].query(grid_coords, k=1)
-    mask_geo = dist.flatten() < 0.012 
+    mask_geo = dist.flatten() < RADIO_ACCIDENTE
+    
     valid_points = grid_coords[mask_geo]
+    dist_valid = dist.flatten()[mask_geo] # Distancias de los puntos válidos
     
     # Si no hay puntos válidos, retornamos el mapa base
     if len(valid_points) == 0: return m._repr_html_()
 
-    # --- LÓGICA DE PREDICCIÓN AVANZADA ---
+    # --- LÓGICA DE PREDICCIÓN  ---
     
     # Manejo de opciones clima
     w_codes = []
@@ -265,8 +266,11 @@ def crear_mapa(ciudad, hora, dia, clima, check_dia):
             X_q[:, 3] = int(dia)
             X_q[:, 4] = w
             
+            # ARREGLO WARNING: Convertir a DataFrame con nombres antes de transformar
+            X_q_df = pd.DataFrame(X_q, columns=['Start_Lat', 'Start_Lng', 'Hour', 'DayOfWeek', 'Weather_Code'])
+            
             # Escalado y prediccionb de probabilidades
-            X_q_scaled = modelo_actual["scaler"].transform(X_q)
+            X_q_scaled = modelo_actual["scaler"].transform(X_q_df)
             probs = modelo_actual["mlp"].predict(X_q_scaled)
             
             # Guardar maximos y acumulados para ponderación final
@@ -279,6 +283,14 @@ def crear_mapa(ciudad, hora, dia, clima, check_dia):
     avg_probs = mean_probs_accum / total_iterations
     prob_preds = (avg_probs * 0.6) + (max_probs * 0.4)
     
+    # AJUSTE SOBREESTIMACIÓN: Penalización por distancia
+    # Si estás en el borde del radio (lejos del accidente real), bajamos la prob
+    decay_factor = 1.0 - (dist_valid / RADIO_ACCIDENTE) # 1 si estas encima, 0 si estas al limite
+    prob_preds = prob_preds * np.clip(decay_factor, 0.2, 1.0) # Nunca bajar de 0.2 el factor
+
+    # ARREGLO ERROR MATEMÁTICO: Clip para evitar negativos antes del power
+    prob_preds = np.clip(prob_preds, 0, 1)
+    
     # Suavizado exponencial para limpiar ruido de fondo
     # .power hace que valores bajos se reduzcan y altos se mantengan o aumenten
     prob_preds = np.power(prob_preds, 1.25)
@@ -288,10 +300,6 @@ def crear_mapa(ciudad, hora, dia, clima, check_dia):
     # Capa de riesgo, visualización vectorial
     riesgo_layer = FeatureGroup(name="Capa_Riesgo", overlay=True)
     
-    # Pre-calculo de pasos para dibujar rectángulos
-    lat_step = (lat_max - lat_min) / resolucion
-    lng_step = (lng_max - lng_min) / resolucion
-
     for i, prob in enumerate(prob_preds):
         val = max(0.0, min(1.0, prob))
         
@@ -303,28 +311,38 @@ def crear_mapa(ciudad, hora, dia, clima, check_dia):
         lat, lng = valid_points[i][0], valid_points[i][1]
         
         # Dibujar rectángulo vectorial
-        folium.Rectangle(
+        # Se añade una clase CSS personalizada (aunque Folium no lo soporta nativamente fácil, 
+        # el script inyectado interceptará el evento click sobre los objetos Leaflet).
+        rect = folium.Rectangle(
             bounds=[[lat, lng], [lat + lat_step, lng + lng_step]],
             color=None, # Sin borde para rendimiento
             fill=True,
             fill_color=color,
             fill_opacity=opacity,
             tooltip=f"{val*100:.0f}%" if val > 0.15 else None 
-        ).add_to(riesgo_layer)
+        )
+        rect.add_to(riesgo_layer)
 
     riesgo_layer.add_to(m)
     
-    # Inyección de JS para interactividad (Toggle + Centrar)
+    # Inyección de JS para interactividad (Toggle + Centrar + Click en Grilla)
     lat_c, lng_c = start_coords
     m.get_root().html.add_child(folium.Element(f"""
         <script>
             var riskLayerRef = null; 
+            
+            // Función auxiliar para notificar al padre
+            function notifyParent(lat, lng) {{
+                if (parent && parent.loadAccidents) {{
+                    parent.loadAccidents(lat, lng);
+                }}
+            }}
+
             // Función para toggle capa
             window.toggleLayerGlobal = function() {{
                 var mapInstance;
                 for (var key in window) {{
                     if (key.startsWith('map_')) {{
-                        // Encontrar instancia del mapa
                         mapInstance = window[key];
                         break;
                     }}
@@ -333,9 +351,14 @@ def crear_mapa(ciudad, hora, dia, clima, check_dia):
 
                 if (!riskLayerRef) {{
                     mapInstance.eachLayer(function(layer) {{
-                        // Buscar la capa de riesgo por tipo
                         if (layer instanceof L.FeatureGroup && layer !== mapInstance) {{
                             riskLayerRef = layer;
+                            // Attach click event to all layers inside this group
+                            riskLayerRef.eachLayer(function(l) {{
+                                l.on('click', function(e) {{
+                                    notifyParent(l.getBounds().getSouthWest().lat, l.getBounds().getSouthWest().lng);
+                                }});
+                            }});
                         }}
                     }});
                 }}
@@ -362,249 +385,35 @@ def crear_mapa(ciudad, hora, dia, clima, check_dia):
                     mapInstance.setView([{lat_c}, {lng_c}], 10);
                 }}
             }};
+            
+            // Inicializar clicks al cargar
+            document.addEventListener("DOMContentLoaded", function() {{
+                setTimeout(function(){{
+                    var mapInstance;
+                    for (var key in window) {{
+                        if (key.startsWith('map_')) {{
+                            mapInstance = window[key];
+                            break;
+                        }}
+                    }}
+                    if(mapInstance) {{
+                         mapInstance.eachLayer(function(layer) {{
+                            if (layer instanceof L.FeatureGroup && layer !== mapInstance) {{
+                                layer.eachLayer(function(l) {{
+                                    l.on('click', function(e) {{
+                                        notifyParent(l.getBounds().getSouthWest().lat, l.getBounds().getSouthWest().lng);
+                                    }});
+                                }});
+                            }}
+                        }});
+                    }}
+                }}, 1000);
+            }});
         </script>
     """))
 
     # Retornar mapa como HTML embebido
     return m._repr_html_()
-
-
-# ==============================================================================
-# FRONTEND (HTML EMBEBIDO)
-# ==============================================================================
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IA Predicción de Accidentes</title>
-    <!-- Bootstrap 5 & Icons -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css">
-    <style>
-        body, html { height: 100%; margin: 0; overflow: hidden; background: #121212; color: #e0e0e0; }
-        .sidebar {
-            height: 100vh;
-            background-color: #1e1e1e;
-            padding: 25px;
-            border-right: 1px solid #333;
-            z-index: 1000;
-            display: flex;
-            flex-direction: column;
-            overflow-y: auto;
-        }
-        .map-wrapper { height: 100vh; padding: 0; position: relative; }
-        iframe { width: 100%; height: 100%; border: none; display: block; }
-        
-        .btn-predict {
-            width: 100%;
-            background: linear-gradient(135deg, #0d6efd, #0dcaf0);
-            border: none;
-            padding: 12px;
-            font-weight: 600;
-            color: white;
-            margin-top: 20px;
-            border-radius: 8px;
-        }
-        .btn-predict:hover { opacity: 0.9; transform: translateY(-1px); }
-        
-        .btn-toggle {
-            background-color: #2c2c2c;
-            color: #b0b0b0;
-            border: 1px solid #444;
-            padding: 10px;
-            border-radius: 8px;
-            transition: all 0.2s;
-        }
-        .btn-toggle:hover { background-color: #383838; color: white; border-color: #666; }
-
-        .btn-center {
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            z-index: 9999;
-            background: #1e1e1e;
-            color: white;
-            border: 1px solid #444;
-            border-radius: 50%;
-            width: 45px;
-            height: 45px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-            cursor: pointer;
-        }
-        .btn-center:hover { background: #333; }
-
-        #loadingOverlay {
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.85);
-            z-index: 2000;
-            display: none;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-        }
-        .spinner-border { width: 3rem; height: 3rem; }
-
-        label { color: #aaa; margin-bottom: 5px; font-size: 0.85rem; font-weight: 500; }
-        .form-select, .form-range { background-color: #2c2c2c; color: white; border: 1px solid #444; }
-        .form-select:focus { background-color: #2c2c2c; color: white; border-color: #0d6efd; box-shadow: none; }
-        
-        .color-box { display: inline-block; width: 10px; height: 10px; margin-right: 8px; border-radius: 50%; }
-        .legend-item { font-size: 0.75rem; color: #bbb; display: flex; align-items: center; margin-bottom: 3px; }
-        
-        h3 { font-weight: 700; letter-spacing: -0.5px; }
-    </style>
-</head>
-<body>
-
-<div id="loadingOverlay">
-    <div class="spinner-border text-info mb-3" role="status"></div>
-    <h4 class="text-white">Procesando Datos...</h4>
-    <small class="text-muted">Analizando Dataset y cargango MLP</small>
-</div>
-
-<div class="container-fluid">
-    <div class="row">
-        <!-- BARRA LATERAL -->
-        <div class="col-md-3 sidebar">
-            <div class="text-center mb-4">
-                <h3 class="mb-1"><i class="bi bi-cpu"></i> MLP</h3>
-                <span class="badge bg-secondary opacity-50">Sistema de prediccón de accidentes USA</span>
-            </div>
-            
-            <form action="/" method="post" id="mainForm" onsubmit="showLoading()">
-                <div class="mb-3">
-                    <label>Ciudad de estudio</label>
-                    <select class="form-select" name="ciudad" onchange="showLoading(); this.form.submit()">
-                        {% for c in ciudades_list %}
-                        <option value="{{ c }}" {% if c == ciudad_sel %}selected{% endif %}>{{ c }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-
-                <!-- Checkbox Solo Día -->
-                <div class="form-check form-switch mb-3">
-                    <input class="form-check-input" type="checkbox" id="checkDia" name="check_dia" 
-                           {% if check_dia %}checked{% endif %} onchange="toggleHourInput()">
-                    <label class="form-check-label" for="checkDia">Predicción general por día</label>
-                </div>
-
-                <div class="mb-3" id="hourInputGroup">
-                    <label>Hora: <span class="text-info" id="hourDisplay">{{ hora }}:00</span></label>
-                    <input type="range" class="form-range" min="0" max="23" name="hora" value="{{ hora }}" 
-                           oninput="document.getElementById('hourDisplay').innerText = this.value + ':00'">
-                </div>
-
-                <div class="mb-3">
-                    <label>Día de la semana</label>
-                    <select class="form-select" name="dia">
-                        <option value="0" {% if dia==0 %}selected{% endif %}>Lunes</option>
-                        <option value="1" {% if dia==1 %}selected{% endif %}>Martes</option>
-                        <option value="2" {% if dia==2 %}selected{% endif %}>Miércoles</option>
-                        <option value="3" {% if dia==3 %}selected{% endif %}>Jueves</option>
-                        <option value="4" {% if dia==4 %}selected{% endif %}>Viernes</option>
-                        <option value="5" {% if dia==5 %}selected{% endif %}>Sábado</option>
-                        <option value="6" {% if dia==6 %}selected{% endif %}>Domingo</option>
-                    </select>
-                </div>
-
-                <div class="mb-3">
-                    <label>Condición climática</label>
-                    <select class="form-select" name="clima">
-                        <option value="Any" {% if clima=='Any' %}selected{% endif %}>🌍 Cualquiera (Promedio)</option>
-                        <option value="Clear" {% if clima=='Clear' %}selected{% endif %}>☀️ Despejado</option>
-                        <option value="Rain" {% if clima=='Rain' %}selected{% endif %}>🌧️ Lluvia</option>
-                        <option value="Cloudy" {% if clima=='Cloudy' %}selected{% endif %}>🌥️ Nublado</option>
-                        <option value="Fog" {% if clima=='Fog' %}selected{% endif %}>🌫️ Niebla</option>
-                        <option value="Snow" {% if clima=='Snow' %}selected{% endif %}>❄️ Nieve</option>
-                    </select>
-                </div>
-
-                <button type="submit" class="btn btn-predict shadow-sm">
-                    <i class="bi bi-lightning-charge"></i> Calcular Riesgo
-                </button>
-            </form>
-
-            <hr class="border-secondary my-4">
-
-            <button class="btn btn-toggle w-100 mb-3" onclick="toggleMapLayer()">
-                <i class="bi bi-eye"></i> <span id="btnText">Ocultar mapa</span>
-            </button>
-
-            <!-- Leyenda Detallada -->
-            <div class="p-3 rounded" style="background: rgba(255,255,255,0.05);">
-                <label class="mb-2 text-uppercase small" style="letter-spacing:1px;">Probabilidad</label>
-                <div class="legend-item"><span class="color-box" style="background:#2c3e50;"></span> < 10% (Base)</div>
-                <div class="legend-item"><span class="color-box" style="background:#1e90ff;"></span> 10-20%</div>
-                <div class="legend-item"><span class="color-box" style="background:#00bfff;"></span> 20-30%</div>
-                <div class="legend-item"><span class="color-box" style="background:#00ced1;"></span> 30-40%</div>
-                <div class="legend-item"><span class="color-box" style="background:#2ecc71;"></span> 40-50%</div>
-                <div class="legend-item"><span class="color-box" style="background:#f1c40f;"></span> 50-60%</div>
-                <div class="legend-item"><span class="color-box" style="background:#f39c12;"></span> 60-70%</div>
-                <div class="legend-item"><span class="color-box" style="background:#e67e22;"></span> 70-80%</div>
-                <div class="legend-item"><span class="color-box" style="background:#e74c3c;"></span> 80-90%</div>
-                <div class="legend-item"><span class="color-box" style="background:#c0392b;"></span> 90-95%</div>
-                <div class="legend-item"><span class="color-box" style="background:#8b0000;"></span> > 95% (Crítico)</div>
-            </div>
-        </div>
-        
-        <!-- VISUALIZACIÓN -->
-        <div class="col-md-9 map-wrapper">
-            <button class="btn-center" onclick="centerMap()" title="Centrar Mapa">
-                <i class="bi bi-crosshair"></i>
-            </button>
-            {{ mapa_html|safe }}    
-        </div>
-    </div>
-</div>
-
-<script>
-    function toggleHourInput() {
-        var checkbox = document.getElementById('checkDia');
-        var group = document.getElementById('hourInputGroup');
-        if (checkbox.checked) {
-            group.style.opacity = '0.3';
-            group.style.pointerEvents = 'none';
-        } else {
-            group.style.opacity = '1';
-            group.style.pointerEvents = 'auto';
-        }
-    }
-    toggleHourInput();
-
-    function showLoading() {
-        document.getElementById('loadingOverlay').style.display = 'flex';
-    }
-
-    function toggleMapLayer() {
-        var iframe = document.querySelector('iframe');
-        if (iframe && iframe.contentWindow && typeof iframe.contentWindow.toggleLayerGlobal === "function") {
-            iframe.contentWindow.toggleLayerGlobal();
-            var btnText = document.getElementById("btnText");
-            if (btnText.innerText.includes("Ocultar")) {
-                btnText.innerText = "Mostrar Capa";
-            } else {
-                btnText.innerText = "Ocultar Capa";
-            }
-        }
-    }
-
-    function centerMap() {
-        var iframe = document.querySelector('iframe');
-        if (iframe && iframe.contentWindow && typeof iframe.contentWindow.centerMapGlobal === "function") {
-            iframe.contentWindow.centerMapGlobal();
-        }
-    }
-</script>
-</body>
-</html>
-"""
 
 # Rutas de Flask
 @app.route("/", methods=["GET", "POST"])
@@ -627,9 +436,113 @@ def index():
     
     mapa = crear_mapa(params['ciudad'], params['hora'], params['dia'], params['clima'], params['check_dia'])
     
-    return render_template_string(HTML_TEMPLATE, mapa_html=mapa, ciudades_list=CIUDADES.keys(), 
+    return render_template('index.html', mapa_html=mapa, ciudades_list=CIUDADES.keys(), 
                                   ciudad_sel=params['ciudad'], hora=params['hora'], 
                                   dia=params['dia'], clima=params['clima'], check_dia=params['check_dia'])
 
+@app.route("/get_accidents", methods=["POST"])
+def get_accidents():
+    # Endpoint AJAX para obtener lista de accidentes
+    data = request.get_json()
+    lat_req = float(data.get('lat'))
+    lng_req = float(data.get('lng'))
+    
+    if modelo_actual["df"] is None or modelo_actual["grid_steps"] is None:
+        return jsonify({"error": "Modelo no cargado"})
+        
+    df = modelo_actual["df"]
+    lat_step, lng_step = modelo_actual["grid_steps"]
+    
+    # Filtrar dataframe dentro del bounding box del cuadrante clickeado
+    # Se usa un pequeño epsilon para asegurar bordes
+    mask = (
+        (df['Start_Lat'] >= lat_req - 0.0001) & 
+        (df['Start_Lat'] < lat_req + lat_step + 0.0001) &
+        (df['Start_Lng'] >= lng_req - 0.0001) & 
+        (df['Start_Lng'] < lng_req + lng_step + 0.0001)
+    )
+    
+    subset = df[mask].head(50) # Limitamos a 50 para no saturar UI
+    
+    # Diccionario simple de traducción
+    WEATHER_TRANSLATION = {
+        'Clear': 'Despejado', 'Fair': 'Despejado', 'Cloudy': 'Nublado', 'Mostly Cloudy': 'Mayormente Nublado',
+        'Partly Cloudy': 'Parcialmente Nublado', 'Rain': 'Lluvia', 'Light Rain': 'Lluvia Ligera',
+        'Heavy Rain': 'Lluvia Fuerte', 'Snow': 'Nieve', 'Light Snow': 'Nieve Ligera',
+        'Fog': 'Niebla', 'Haze': 'Neblina', 'Thunderstorm': 'Tormenta', 'Overcast': 'Cubierto',
+        'Mist': 'Neblina', 'Scattered Clouds': 'Nubes Dispersas'
+    }
+
+    resultado = []
+    for _, row in subset.iterrows():
+        # Procesamos fecha y hora por separado, ignoramos severidad
+        dt = pd.to_datetime(row['Start_Time'])
+        weather_en = row['Weather_Condition']
+        weather_es = WEATHER_TRANSLATION.get(weather_en, weather_en) # Fallback al inglés si no encuentra
+        
+        resultado.append({
+            "date": dt.strftime('%Y-%m-%d'),
+            "time": dt.strftime('%H:%M'),
+            "weather": weather_es,
+            "desc": row.get('Description', 'Sin descripción')
+        })
+        
+    return jsonify(resultado)
+
+@app.route("/get_dashboard_stats", methods=["GET"])
+def get_dashboard_stats():
+    # Calcular estadisticas globales para la ciudad cargada
+    if modelo_actual["df"] is None:
+        return jsonify({"error": "Datos no cargados"})
+    
+    df = modelo_actual["df"]
+    
+    # Total Accidentes
+    total = len(df)
+    
+    # Crecimiento anual
+    df['Year'] = df['Start_Time'].dt.year
+    counts_by_year = df['Year'].value_counts().sort_index()
+    
+    growth_rate = 0
+    if len(counts_by_year) >= 2:
+        last_year_count = counts_by_year.iloc[-1]
+        prev_year_count = counts_by_year.iloc[-2]
+        if prev_year_count > 0:
+            growth_rate = ((last_year_count - prev_year_count) / prev_year_count) * 100
+            
+    # Top Climas
+    top_weather_raw = df['Weather_Condition'].value_counts().head(4)
+    
+    # Reutilizamos traduccion
+    WEATHER_TRANSLATION = {
+        'Clear': 'Despejado', 'Fair': 'Despejado', 'Cloudy': 'Nublado', 'Mostly Cloudy': 'Mayormente Nublado',
+        'Partly Cloudy': 'Parcialmente Nublado', 'Rain': 'Lluvia', 'Light Rain': 'Lluvia Ligera',
+        'Heavy Rain': 'Lluvia Fuerte', 'Snow': 'Nieve', 'Light Snow': 'Nieve Ligera',
+        'Fog': 'Niebla', 'Haze': 'Neblina', 'Thunderstorm': 'Tormenta', 'Overcast': 'Cubierto',
+        'Mist': 'Neblina', 'Scattered Clouds': 'Nubes Dispersas'
+    }
+    
+    top_weather = []
+    for w, c in top_weather_raw.items():
+        top_weather.append([WEATHER_TRANSLATION.get(w, w), int(c)]) # int para serializacion json
+        
+    # Dia Mas Peligroso
+    days_map = {0:'Lunes', 1:'Martes', 2:'Miércoles', 3:'Jueves', 4:'Viernes', 5:'Sábado', 6:'Domingo'}
+    day_idx = df['DayOfWeek'].value_counts().idxmax()
+    most_common_day = days_map.get(day_idx, "N/A")
+    
+    # Distribución Día/Noche (6am - 6pm)
+    day_accidents = len(df[(df['Hour'] >= 6) & (df['Hour'] < 18)])
+    day_pct = round((day_accidents / total) * 100, 1)
+
+    return jsonify({
+        "total": int(total),
+        "growth": growth_rate,
+        "top_weather": top_weather,
+        "most_common_day": most_common_day,
+        "day_pct": day_pct
+    })
+
 if __name__ == "__main__":
-    app.run(debug=False, port=5000)
+    app.run(debug=False, port=8080)

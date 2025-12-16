@@ -1,0 +1,140 @@
+body, html { height: 100%; margin: 0; overflow: hidden; background: #121212; color: #e0e0e0; }
+.sidebar {
+    height: 100vh;
+    background-color: #1e1e1e;
+    padding: 25px;
+    border-right: 1px solid #333;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+}
+
+/* Nueva Sidebar derecha para detalles */
+.right-sidebar {
+    position: fixed;
+    right: -400px;
+    top: 0;
+    width: 350px;
+    height: 100vh;
+    background-color: #1e1e1e;
+    border-left: 1px solid #333;
+    z-index: 1050;
+    transition: right 0.3s ease-in-out;
+    padding: 20px;
+    overflow-y: auto;
+    box-shadow: -5px 0 15px rgba(0,0,0,0.5);
+}
+.right-sidebar.active { right: 0; }
+
+/* Estilos Dashboard Overlay */
+.dashboard-overlay {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.7);
+    backdrop-filter: blur(8px);
+    z-index: 3000;
+    display: none;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+}
+.dashboard-content {
+    background: #2c2c2c;
+    width: 90%;
+    max-width: 900px;
+    border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    padding: 30px;
+    max-height: 90vh;
+    overflow-y: auto;
+    border: 1px solid #444;
+}
+.stat-card {
+    background: #383838;
+    border-radius: 8px;
+    padding: 15px;
+    text-align: center;
+    height: 100%;
+    border: 1px solid #555;
+}
+.stat-val { font-size: 2rem; font-weight: 700; color: #0dcaf0; }
+.stat-label { font-size: 0.9rem; color: #bbb; text-transform: uppercase; letter-spacing: 1px; }
+.growth-pos { color: #2ecc71; }
+.growth-neg { color: #e74c3c; }
+
+.map-wrapper { height: 100vh; padding: 0; position: relative; }
+iframe { width: 100%; height: 100%; border: none; display: block; }
+
+.btn-predict {
+    width: 100%;
+    background: linear-gradient(135deg, #0d6efd, #0dcaf0);
+    border: none;
+    padding: 12px;
+    font-weight: 600;
+    color: white;
+    margin-top: 20px;
+    border-radius: 8px;
+}
+.btn-predict:hover { opacity: 0.9; transform: translateY(-1px); }
+
+.btn-toggle {
+    background-color: #2c2c2c;
+    color: #b0b0b0;
+    border: 1px solid #444;
+    padding: 10px;
+    border-radius: 8px;
+    transition: all 0.2s;
+}
+.btn-toggle:hover { background-color: #383838; color: white; border-color: #666; }
+
+.btn-center {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    z-index: 9999;
+    background: #1e1e1e;
+    color: white;
+    border: 1px solid #444;
+    border-radius: 50%;
+    width: 45px;
+    height: 45px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    cursor: pointer;
+}
+.btn-center:hover { background: #333; }
+
+.btn-close-sidebar {
+    background: none; border: none; color: #fff; font-size: 1.5rem; float: right;
+}
+.btn-close-sidebar:hover { color: #dc3545; }
+
+#loadingOverlay {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.85);
+    z-index: 2000;
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+}
+.spinner-border { width: 3rem; height: 3rem; }
+
+label { color: #aaa; margin-bottom: 5px; font-size: 0.85rem; font-weight: 500; }
+.form-select, .form-range { background-color: #2c2c2c; color: white; border: 1px solid #444; }
+.form-select:focus { background-color: #2c2c2c; color: white; border-color: #0d6efd; box-shadow: none; }
+
+/* Grid para leyenda */
+.legend-container { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.color-box { display: inline-block; width: 10px; height: 10px; margin-right: 8px; border-radius: 50%; }
+.legend-item { font-size: 0.75rem; color: #bbb; display: flex; align-items: center; margin-bottom: 3px; }
+
+h3 { font-weight: 700; letter-spacing: -0.5px; }
+
+/* Estilos para lista de accidentes */
+.acc-item { background: #2c2c2c; border-radius: 6px; padding: 10px; margin-bottom: 10px; border-left: 3px solid #17a2b8; }
+.acc-desc { font-size: 0.85rem; margin-top: 4px; color: #eee; }
